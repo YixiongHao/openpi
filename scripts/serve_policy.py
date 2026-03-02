@@ -1,3 +1,7 @@
+import os
+
+os.environ["OPENPI_DATA_HOME"] = os.path.expanduser("~/scratch/openpi")
+
 import dataclasses
 import enum
 import logging

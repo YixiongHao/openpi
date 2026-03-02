@@ -1,3 +1,10 @@
+import os
+import sys
+
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["MUJOCO_EGL_DEVICE_ID"] = "1"  # Use second GPU for rendering (server uses GPU 0)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "third_party", "libero"))
+
 import collections
 import dataclasses
 import logging
@@ -13,6 +20,7 @@ from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
+import wandb
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -46,6 +54,13 @@ class Args:
 
 
 def eval_libero(args: Args) -> None:
+    # Initialize wandb for system monitoring
+    wandb.init(
+        project="openpi-libero",
+        config=dataclasses.asdict(args),
+        settings=wandb.Settings(_stats_sample_rate_seconds=5, _stats_samples_to_average=1),
+    )
+
     # Set random seed
     np.random.seed(args.seed)
 
@@ -74,7 +89,7 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
+    for task_id in tqdm.tqdm([5]):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -138,6 +153,7 @@ def eval_libero(args: Args) -> None:
                                 )
                             ),
                             "prompt": str(task_description),
+                            # "prompt": "pick up the book and place it in the left compartment of the caddy",
                         }
 
                         # Query model to get action
@@ -168,7 +184,7 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx}_{suffix}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
             )
