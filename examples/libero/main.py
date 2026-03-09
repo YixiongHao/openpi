@@ -25,6 +25,10 @@ import wandb
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
+# Custom prompts: one per task in task_ids. Set to None to use default task descriptions.
+# Example: CUSTOM_PROMPTS = ["pick up the red cup", "open the drawer"]
+CUSTOM_PROMPTS: list[str] | None = None
+
 
 @dataclasses.dataclass
 class Args:
@@ -49,6 +53,8 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
+
+    task_ids: tuple[int, ...] | None = None  # Task indexes to evaluate. If None, evaluates all tasks in the suite.
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -89,7 +95,13 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm([5]):
+    task_ids = args.task_ids if args.task_ids is not None else range(num_tasks_in_suite)
+    if CUSTOM_PROMPTS is not None and len(CUSTOM_PROMPTS) != len(task_ids):
+        raise ValueError(
+            f"CUSTOM_PROMPTS has {len(CUSTOM_PROMPTS)} entries but task_ids has {len(task_ids)} entries. "
+            "They must match 1:1."
+        )
+    for task_idx, task_id in enumerate(tqdm.tqdm(task_ids)):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -98,6 +110,8 @@ def eval_libero(args: Args) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
+        if CUSTOM_PROMPTS is not None:
+            task_description = CUSTOM_PROMPTS[task_idx]
 
         # Start episodes
         task_episodes, task_successes = 0, 0

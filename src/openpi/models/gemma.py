@@ -25,6 +25,8 @@ We follow this einsum axis naming convention:
   D: d_model ("features")
 """
 
+from __future__ import annotations
+
 from collections.abc import Sequence
 import dataclasses
 from typing import Literal, TypeAlias
@@ -33,10 +35,45 @@ import einops
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 import openpi.models.lora as lora
 import openpi.shared.array_typing as at
 import openpi.training.sharding as sharding
+
+
+# ---------------------------------------------------------------------------
+# Activation collection: captures per-layer VLM hidden states via
+# jax.debug.callback.  Set the global collector to enable; leave as None
+# (the default) for zero-overhead inference / training.
+# ---------------------------------------------------------------------------
+
+class ActivationCollector:
+    """Stores per-layer VLM hidden states populated by jax.debug.callback."""
+
+    def __init__(self) -> None:
+        self.buffer: dict[int, np.ndarray] = {}
+
+    def capture(self, layer_idx, hidden_states) -> None:
+        self.buffer[int(layer_idx)] = np.asarray(hidden_states)
+
+    def get_and_clear(self) -> dict[int, np.ndarray]:
+        result = dict(self.buffer)
+        self.buffer.clear()
+        return result
+
+
+_activation_collector: ActivationCollector | None = None
+
+
+def set_activation_collector(collector: ActivationCollector | None) -> None:
+    global _activation_collector
+    _activation_collector = collector
+
+
+def _capture_callback(layer_idx, hidden_states) -> None:
+    if _activation_collector is not None:
+        _activation_collector.capture(layer_idx, hidden_states)
 
 PALIGEMMA_VOCAB_SIZE = 257_152
 
@@ -290,7 +327,7 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True, layer_idx=None, steering_params=None):  # noqa: FBT002
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -330,6 +367,26 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
+        # Activation steering: add steering vector at post-MLP residual.
+        sv_matrix, layer_start, layer_end, scale, expert_idx = steering_params
+        in_range = jnp.logical_and(layer_idx >= layer_start, layer_idx <= layer_end)
+        sv = sv_matrix[layer_idx]  # (max_width,) — vector for this layer
+        steered_xs = []
+        for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
+            if x is not None:
+                sv_i = sv[:config.width]
+                is_target = jnp.logical_and(in_range, jnp.equal(expert_idx, i))
+                steering_delta = (jnp.where(is_target, scale, jnp.float32(0.0)) * sv_i).astype(x.dtype)
+                x = x + steering_delta  # noqa: PLW2901
+            steered_xs.append(x)
+        xs = steered_xs
+
+        # Capture VLM (expert 0) hidden states for activation collection.
+        # Resolved at trace time: only compiled into the graph when VLM is active
+        # (prefix forward), not during suffix/denoising calls where xs[0] is None.
+        if xs[0] is not None:
+            jax.debug.callback(_capture_callback, layer_idx, xs[0])
+
         return xs, kv_cache
 
 
@@ -367,12 +424,14 @@ class Module(nn.Module):
             variable_axes={"params": 0},
             split_rngs={"params": True, "dropout": True},
             in_axes=(
-                0,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-                nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                0,              # kv_cache
+                nn.broadcast,   # positions
+                nn.broadcast,   # mask
+                nn.broadcast,   # adarms_cond
+                nn.broadcast,   # deterministic
+                0,              # layer_idx (scanned: 0..depth-1)
+                nn.broadcast,   # steering_params
+            ),
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -396,13 +455,38 @@ class Module(nn.Module):
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
+        steering_params: tuple | None = None,
     ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        # Prepare steering params for the scan (always pass a tuple so the scan
+        # signature is stable; use layer_start/end = -1 / scale=0 to disable).
+        depth = self.configs[0].depth
+        max_width = max(c.width for c in self.configs)
+        if steering_params is None:
+            scan_steering = (
+                jnp.zeros((depth, max_width), dtype=jnp.dtype(self.embed_dtype)),
+                jnp.int32(-1),
+                jnp.int32(-1),
+                jnp.float32(0.0),
+                jnp.int32(0),
+            )
+        else:
+            sv_matrix, layer_start, layer_end, scale, expert_idx = steering_params
+            # Pad each row to max expert width so slicing in Block always works.
+            if sv_matrix.shape[1] < max_width:
+                sv_matrix = jnp.pad(sv_matrix, ((0, 0), (0, max_width - sv_matrix.shape[1])))
+            scan_steering = (sv_matrix.astype(jnp.dtype(self.embed_dtype)), layer_start, layer_end, scale, expert_idx)
+
+        layer_indices = jnp.arange(self.configs[0].depth, dtype=jnp.int32)
+
+        embedded, kv_cache = self.layers(
+            embedded, kv_cache, positions, mask, adarms_cond, deterministic,
+            layer_indices, scan_steering,
+        )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 

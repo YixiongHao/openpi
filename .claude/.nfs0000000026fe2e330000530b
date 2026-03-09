@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *)",
+      "Bash(lsof *)",
+      "Bash(ss *)",
+      "Bash(python3 -c \":*)",
+      "Read(//home/hice1/yhao96/**)",
+      "Bash(head:*)",
+      "Bash(python:*)",
+      "Bash(sinfo -o \"%P %G %N %l\")",
+      "Bash(sinfo -o \"%N %G\")"
+    ]
+  }
+}
