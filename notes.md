@@ -173,7 +173,7 @@ exactly as you would for normal inference:
 ```bash
 # LIBERO example
 source examples/libero/.venv/bin/activate
-python examples/libero/main.py --args.task-suite-name libero_spatial --args.num-trials-per-task 5
+python examples/libero/main.py --args.task-suite-name libero_spatial --args.num-trials-per-task 5 --args.video-out-path interp/videos
 ```
 The client sends observations + a task prompt; the server applies steering transparently.
 

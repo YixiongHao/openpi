@@ -124,16 +124,30 @@ def _build_sample_kwargs(args: Args) -> dict:
     layer_start, layer_end = _parse_steering_layers(args.steering_layers)
     sv_matrix = load_steering_vector(args.steering_vector)  # (18, 2048)
     expert_idx = 0 if args.steering_component == "vlm" else 1
+    sv_np = sv_matrix.numpy() if hasattr(sv_matrix, 'numpy') else np.array(sv_matrix)
     logging.info(
         "Activation steering: vector=%s, layers=[%d, %d], scale=%.4f, component=%s",
         args.steering_vector, layer_start, layer_end, args.steering_scale, args.steering_component,
     )
+    logging.info(
+        "Steering vector stats: shape=%s, norm=%.6f, abs_max=%.6f, abs_mean=%.6f, nonzero=%d/%d",
+        sv_np.shape,
+        np.linalg.norm(sv_np),
+        np.abs(sv_np).max(),
+        np.abs(sv_np).mean(),
+        np.count_nonzero(sv_np),
+        sv_np.size,
+    )
+    for layer_i in range(layer_start, layer_end + 1):
+        row = sv_np[layer_i]
+        logging.info(
+            "  layer %d: norm=%.6f, abs_max=%.6f, nonzero=%d/%d",
+            layer_i, np.linalg.norm(row), np.abs(row).max(), np.count_nonzero(row), row.size,
+        )
 
     # For JAX: steering_params is a tuple of JAX arrays passed via sample_kwargs.
     # For PyTorch: hooks are registered separately after policy creation.
     import jax.numpy as jnp
-
-    sv_np = sv_matrix.numpy() if hasattr(sv_matrix, 'numpy') else np.array(sv_matrix)
     sample_kwargs["steering_params"] = (
         jnp.array(sv_np),                # (18, hidden_dim)
         jnp.int32(layer_start),
@@ -193,6 +207,18 @@ class ActivationCollectorPolicy:
 
 
 def main(args: Args) -> None:
+    # Warn if steering scale is set but no vector is provided.
+    if args.steering_vector is None and args.steering_scale != 1.0:
+        logging.warning(
+            "steering_scale=%.4f but no --steering_vector provided — steering is DISABLED. "
+            "Pass --steering_vector /path/to/vector.pt to enable.",
+            args.steering_scale,
+        )
+    if args.steering_vector is not None:
+        logging.info("Steering ENABLED: vector=%s, scale=%.4f", args.steering_vector, args.steering_scale)
+    else:
+        logging.info("Steering DISABLED (no --steering_vector)")
+
     sample_kwargs = _build_sample_kwargs(args)
     policy = create_policy(args, sample_kwargs=sample_kwargs or None)
     policy_metadata = policy.metadata

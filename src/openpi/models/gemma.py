@@ -480,6 +480,10 @@ class Module(nn.Module):
             if sv_matrix.shape[1] < max_width:
                 sv_matrix = jnp.pad(sv_matrix, ((0, 0), (0, max_width - sv_matrix.shape[1])))
             scan_steering = (sv_matrix.astype(jnp.dtype(self.embed_dtype)), layer_start, layer_end, scale, expert_idx)
+            jax.debug.print(
+                "[STEER] Module.__call__: sv_norm={sn}, scale={sc}, layers=[{ls},{le}], expert={ei}",
+                sn=jnp.linalg.norm(sv_matrix), sc=scale, ls=layer_start, le=layer_end, ei=expert_idx,
+            )
 
         layer_indices = jnp.arange(self.configs[0].depth, dtype=jnp.int32)
 

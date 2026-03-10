@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import sys
 
@@ -25,10 +27,6 @@ import wandb
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
 
-# Custom prompts: one per task in task_ids. Set to None to use default task descriptions.
-# Example: CUSTOM_PROMPTS = ["pick up the red cup", "open the drawer"]
-CUSTOM_PROMPTS: list[str] | None = None
-
 
 @dataclasses.dataclass
 class Args:
@@ -54,7 +52,11 @@ class Args:
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
 
-    task_ids: tuple[int, ...] | None = None  # Task indexes to evaluate. If None, evaluates all tasks in the suite.
+    task_ids: tuple[int, ...] | None = None  # Task indices to evaluate (e.g. --args.task-ids 0 2 5). If None, evaluates all.
+
+    # Custom prompts to override the default task description.
+    # Must provide exactly one per task_id (matched by position).
+    custom_prompts: tuple[str, ...] | None = None
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -88,20 +90,29 @@ def eval_libero(args: Args) -> None:
         max_steps = 520  # longest training demo has 505 steps
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
+    elif args.task_suite_name == "libero_custom":
+        max_steps = 520  # same as libero_10 (conservative upper bound)
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
 
+    # Validate custom prompts
+    task_ids = args.task_ids if args.task_ids is not None else tuple(range(num_tasks_in_suite))
+    if args.custom_prompts is not None:
+        if len(args.custom_prompts) != len(task_ids):
+            raise ValueError(
+                f"Number of custom prompts ({len(args.custom_prompts)}) must match "
+                f"number of task IDs ({len(task_ids)})"
+            )
+    # Build task_id -> prompt mapping
+    prompt_override: dict[int, str] = {}
+    if args.custom_prompts is not None:
+        prompt_override = dict(zip(task_ids, args.custom_prompts))
+
     # Start evaluation
     total_episodes, total_successes = 0, 0
-    task_ids = args.task_ids if args.task_ids is not None else range(num_tasks_in_suite)
-    if CUSTOM_PROMPTS is not None and len(CUSTOM_PROMPTS) != len(task_ids):
-        raise ValueError(
-            f"CUSTOM_PROMPTS has {len(CUSTOM_PROMPTS)} entries but task_ids has {len(task_ids)} entries. "
-            "They must match 1:1."
-        )
-    for task_idx, task_id in enumerate(tqdm.tqdm(task_ids)):
+    for task_id in tqdm.tqdm(task_ids):
         # Get task
         task = task_suite.get_task(task_id)
 
@@ -110,8 +121,9 @@ def eval_libero(args: Args) -> None:
 
         # Initialize LIBERO environment and task description
         env, task_description = _get_libero_env(task, LIBERO_ENV_RESOLUTION, args.seed)
-        if CUSTOM_PROMPTS is not None:
-            task_description = CUSTOM_PROMPTS[task_idx]
+        if task_id in prompt_override:
+            logging.info(f"Overriding prompt for task {task_id}: {task_description!r} -> {prompt_override[task_id]!r}")
+            task_description = prompt_override[task_id]
 
         # Start episodes
         task_episodes, task_successes = 0, 0
@@ -167,7 +179,6 @@ def eval_libero(args: Args) -> None:
                                 )
                             ),
                             "prompt": str(task_description),
-                            # "prompt": "pick up the book and place it in the left compartment of the caddy",
                         }
 
                         # Query model to get action

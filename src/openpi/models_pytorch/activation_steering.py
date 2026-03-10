@@ -48,7 +48,7 @@ class SteeringConfig:
 def load_steering_vector(path: str) -> torch.Tensor:
     """Load a steering vector matrix from disk.
 
-    Supports ``.pt`` (``torch.save`` / ``torch.load``) and ``.npy`` formats.
+    Supports ``.pt``, ``.npy``, and ``.npz`` (with keys ``layer_0``..``layer_17``) formats.
     Returns a 2-D CPU tensor of shape ``(18, hidden_dim)``.
     """
     if path.endswith(".pt") or path.endswith(".pth"):
@@ -57,9 +57,16 @@ def load_steering_vector(path: str) -> torch.Tensor:
         import numpy as np
 
         vec = torch.from_numpy(np.load(path))
+    elif path.endswith(".npz"):
+        import numpy as np
+
+        data = np.load(path)
+        vec = torch.from_numpy(
+            np.stack([data[f"layer_{i}"] for i in range(18)])
+        )
     else:
         raise ValueError(
-            f"Unsupported steering vector format: {path!r}. Use .pt or .npy."
+            f"Unsupported steering vector format: {path!r}. Use .pt, .npy, or .npz."
         )
 
     if vec.ndim != 2 or vec.shape[0] != 18:
