@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "third_pa
 
 import collections
 import dataclasses
+import json
 import logging
 import math
 import pathlib
@@ -51,12 +52,16 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
+    save_videos: bool = True  # Save rollout videos. Use --args.no-save-videos to disable.
+    save_wrist_videos: bool = False  # Also save wrist-cam videos. Use --args.save-wrist-videos to enable.
 
     task_ids: tuple[int, ...] | None = None  # Task indices to evaluate (e.g. --args.task-ids 0 2 5). If None, evaluates all.
 
     # Custom prompts to override the default task description.
     # Must provide exactly one per task_id (matched by position).
     custom_prompts: tuple[str, ...] | None = None
+
+    results_out: str | None = None  # Path to save per-rollout results as JSON. If None, no file is written.
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -78,7 +83,8 @@ def eval_libero(args: Args) -> None:
     num_tasks_in_suite = task_suite.n_tasks
     logging.info(f"Task suite: {args.task_suite_name}")
 
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    if args.save_videos or args.save_wrist_videos:
+        pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
         max_steps = 220  # longest training demo has 193 steps
@@ -112,6 +118,7 @@ def eval_libero(args: Args) -> None:
 
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    rollout_results = []
     for task_id in tqdm.tqdm(task_ids):
         # Get task
         task = task_suite.get_task(task_id)
@@ -140,6 +147,7 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            wrist_replay_images = []
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -163,7 +171,10 @@ def eval_libero(args: Args) -> None:
                     )
 
                     # Save preprocessed image for replay video
-                    replay_images.append(img)
+                    if args.save_videos:
+                        replay_images.append(img)
+                    if args.save_wrist_videos:
+                        wrist_replay_images.append(wrist_img)
 
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
@@ -204,15 +215,33 @@ def eval_libero(args: Args) -> None:
 
             task_episodes += 1
             total_episodes += 1
+            task_steps = t - args.num_steps_wait
 
-            # Save a replay video of the episode
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx}_{suffix}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-            )
+            rollout_results.append({
+                "task_id": task_id,
+                "task_description": task_description,
+                "episode_idx": episode_idx,
+                "success": bool(done),
+                "steps": task_steps,
+                "duration_s": round(task_steps * env.control_timestep, 3),
+            })
+
+            # Save replay videos
+            if args.save_videos or args.save_wrist_videos:
+                suffix = "success" if done else "failure"
+                task_segment = task_description.replace(" ", "_")
+                if args.save_videos:
+                    imageio.mimwrite(
+                        pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx}_{suffix}.mp4",
+                        [np.asarray(x) for x in replay_images],
+                        fps=10,
+                    )
+                if args.save_wrist_videos:
+                    imageio.mimwrite(
+                        pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_ep{episode_idx}_{suffix}_wrist.mp4",
+                        [np.asarray(x) for x in wrist_replay_images],
+                        fps=10,
+                    )
 
             # Log current results
             logging.info(f"Success: {done}")
@@ -225,6 +254,12 @@ def eval_libero(args: Args) -> None:
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+
+    if args.results_out is not None:
+        out_path = pathlib.Path(args.results_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(rollout_results, indent=2))
+        logging.info(f"Results saved to {out_path}")
 
 
 def _get_libero_env(task, resolution, seed):

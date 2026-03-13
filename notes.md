@@ -180,8 +180,18 @@ The client sends observations + a task prompt; the server applies steering trans
 ### Custom prompts
 The client sends a `"prompt"` key with each observation (e.g. the task description in LIBERO).
 To use a custom prompt:
-- **Client-side (recommended):** Change the `"prompt"` value in the client's observation dict
-  (e.g. in `examples/libero/main.py` line ~155).
+- **Client-side CLI flag (recommended):** Use `--args.custom-prompts` alongside `--args.task-ids`
+  to override the default task description per task. One prompt per task ID, matched by position:
+  ```bash
+  source examples/libero/.venv/bin/activate
+  # Override prompts for tasks 0 and 3 (one prompt per task ID, positional match)
+  python examples/libero/main.py \
+      --args.task-suite-name libero_spatial \
+      --args.num-trials-per-task 5 \
+      --args.task-ids 0 3 \
+      --args.custom-prompts "pick up the red bowl" "move the plate to the left"
+  ```
+  The number of prompts must exactly match the number of task IDs.
 - **Server-side fallback:** Use `--default-prompt "your prompt"` on the server. This only
   takes effect when the client does NOT send a `"prompt"` key in the observation data.
 
@@ -196,6 +206,49 @@ To use a custom prompt:
 
 ### How it works
 The `(18, 2048)` matrix is passed as `steering_params` through `sample_kwargs` → `Pi0.sample_actions` → `gemma.Module` → `nn.scan(Block)`. Inside `Block.__call__`, the current layer's vector is indexed from the matrix, and a `jnp.where` conditional adds `scale * vector` only for layers within `[layer_start, layer_end]` and the target expert. When disabled, default no-op params (`layer_start=-1, layer_end=-1, scale=0`) ensure zero overhead.
+
+## Video Saving
+
+By default the client saves an agentview mp4 replay for every episode. Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--args.save-videos` / `--args.no-save-videos` | on | Agentview (third-person) camera videos |
+| `--args.save-wrist-videos` / `--args.no-save-wrist-videos` | off | Wrist (eye-in-hand) camera videos |
+
+Wrist videos are saved alongside agentview videos with a `_wrist` suffix:
+```
+rollout_<task>_ep0_success.mp4        # agentview
+rollout_<task>_ep0_success_wrist.mp4  # wrist cam
+```
+
+For batch sweeps, disable both to avoid overhead:
+```bash
+python examples/libero/main.py --args.no-save-videos ...
+```
+
+## Steering Sweep (SLURM Array Job)
+
+`scripts/sweep_steering.sbatch` runs a hyperparameter sweep over steering layer ranges
+and scales. Each array task launches a policy server + LIBERO client for one config.
+
+```bash
+mkdir -p logs
+sbatch scripts/sweep_steering.sbatch          # run full sweep
+sbatch --array=0-3 scripts/sweep_steering.sbatch  # run subset
+```
+
+Edit the arrays at the top of the script to define the sweep grid:
+```bash
+LAYER_STARTS=(  10  10  10  10   8   8   8   8  12  12  12  12 )
+LAYER_ENDS=(    12  12  12  12  14  14  14  14  16  16  16  16 )
+SCALES=(        1.0 5.0 15.0 30.0  1.0 5.0 15.0 30.0  1.0 5.0 15.0 30.0 )
+```
+Update `--array=0-N` to match the number of configs. Other settings (steering vector
+path, task suite, num trials, task IDs, video saving) are configurable at the top of
+the file.
+
+Logs go to `logs/sweep_<jobid>_<arrayidx>.{out,err}`.
 
 ## Troubleshooting
 
